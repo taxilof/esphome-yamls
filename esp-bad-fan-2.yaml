@@ -1,0 +1,177 @@
+esphome:
+  name: esp-bad-fan-2
+  friendly_name: esp-bad-fan-2
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+# Enable logging
+logger:
+
+ # logs:
+ #   servo: INFO
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "2/hI7iAgNcjrOXLtphQgpqoGFYobnYUl9rz3/FbdcRw="
+
+ota:
+  - platform: esphome
+    password: "5cc0e1d59b641d7d1de2800a58a8a20f"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  manual_ip:
+    static_ip: 192.168.1.38
+    gateway: 192.168.1.1
+    subnet: 255.255.255.0
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Esp-Bad-Fan-2 Fallback Hotspot"
+    password: "RS3FvVet7Rlp"
+
+captive_portal:
+    
+
+
+web_server:
+  port: 80
+
+# ESP32-C3 Pinout
+# Pin C3  | GPIO ESP32c3 | Function      | Remark                              | GPIO seeed xiao ESP32c6 (do not use)
+# --------|--------------|---------------|-------------------------------------|-----------------------------------
+# 10      | 1            | PWM Fan       | < 45%: in  45-55%: off  > 55%: out | 19
+# 2       | 6            | PWM Servo     |                                     | 1
+# 6       | 10           | SDA           | INA219: servo current AHT20: Temp & Hum | 22
+# 7       | 20           | SCL           | INA219: servo current AHT20: Temp & Hum | 23
+# 4       | 8            | Signal Motion | IR sensor for motion               | 21
+# 11      | 2            | Pin Reserve   | do not use                         | 20
+# 13      | 4            | 1 Wire        | do not use                         | 18
+#
+# Components:
+# - ESP32-C3 MCU
+# - AHT20: I2C temperature and humidity sensor
+# - INA219: I2C current sensor for servo current monitoring
+# - PWM Fan: GPIO 1, controlled by Home Assistant with speed 0-100% (<45% in, 45-55% off, >55% out)
+# - PWM Servo: GPIO 6, continuous rotation for shutter control (needs to be open for fan airflow). 
+
+
+
+i2c:
+  sda: GPIO10
+  scl: GPIO20
+  scan: true
+
+# ---
+
+sensor:
+  # AHT10 Sensor
+  - platform: aht10
+    temperature:
+      name: "Fan-2 Temperature"
+      id: temp_sensor
+    humidity:
+      name: "Fan-2 Humidity"
+      id: hum_sensor
+    update_interval: 60s
+
+  # INA219 Current/Power Monitor
+  - platform: ina219
+    address: 0x40
+    shunt_resistance: 0.1
+    max_current: 0.8
+    current:
+      name: "Servo Current"
+      id: servo_current
+      accuracy_decimals: 3
+      # Safety check: Stop the servo if current is too high (likely jammed)
+      on_value:
+        lambda: |-
+          if (x > 0.15) {
+            id(shutter_servo).write(0.0);
+          }
+    update_interval: 100ms
+
+  # Template Sensor for Fan Speed (for display/tracking)
+  - platform: template
+    name: "Dusche Fan Speed PWM"
+    id: dusche_fan_sensor_pwm
+    device_class: "power_factor"
+    lambda: |-
+      return id(dusche_fan).speed;
+    update_interval: 10s
+
+# ---
+
+output:
+  # Fan PWM Output (High Frequency)
+  - platform: ledc
+    pin: GPIO1
+    id: fan_pwm
+    frequency: 3000
+
+  # Servo PWM Output (Low Frequency)
+  - platform: ledc
+    pin: GPIO6
+    id: servo_pwm
+    frequency: 50
+
+# ---
+
+servo:
+  - output: servo_pwm
+    id: shutter_servo
+    auto_detach_time: 2000ms
+    restore: no
+    min_level: 5%
+    idle_level: 7.5%
+    max_level: 10%  
+
+# ---
+
+fan:
+  - platform: speed
+    output: fan_pwm
+    name: "Dusche Fan Speed"
+    speed_count: 100
+    id: dusche_fan
+    
+    # Logic to control the shutter based on fan speed
+    on_speed_set:
+      then:
+        lambda: |-
+          if (x > 55 || x < 45) {
+            id(shutter_servo).write(-0.2); 
+          } 
+          else { 
+            id(shutter_servo).write(0.2); 
+          }
+
+    # Preset Modes for easier control
+    preset_modes:
+      - "Off" # Neutral/Idle
+      - "Out" # Exhaust
+      - "In"  # Intake
+    
+    # Set speed and let on_speed_set handle the shutter
+    on_preset_set:
+      then:
+        lambda: |-
+          if (x == "Off") {
+            auto call = id(dusche_fan).turn_on();
+            call.set_speed(50); // Neutral speed
+            call.perform();
+          } else if (x == "Out") {
+            auto call = id(dusche_fan).turn_on();
+            call.set_speed(90); // Exhaust speed
+            call.perform();
+          } else if (x == "In") {
+            auto call = id(dusche_fan).turn_on();
+            call.set_speed(10); // Intake speed
+            call.perform();
+          }
